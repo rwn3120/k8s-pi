@@ -1,0 +1,5 @@
+# cluster hosts (content of this file will be inserted into /etc/hosts on your PI)
+# use <ip> <node name>
+192.168.0.1     green-master
+192.168.0.2     yellow-worker
+192.168.0.3     red-worker    
