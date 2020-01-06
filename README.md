@@ -1,6 +1,6 @@
 # Run k8s on your Raspberry Pi
 
-Please note that this pet project is still at WIP phase.
+Please note that this pet project is still at **WIP phase**.
 
 ## 3 node setup
 
@@ -13,8 +13,8 @@ You will need:
 
 Cluster description (colors are matching colored network cables in my cluster):
 - 3 nodes
-  - 1 master: green-master
-  - 2 workers: yellow-worker, red-worker
+  - 1 master: `green-master`
+  - 2 workers: `yellow-worker`, `red-worker`
 
 ### Load image to MicroSD cards
 - put MicroSD card for `green-master` node into your PC and run (tested on Debian)
@@ -24,11 +24,11 @@ sudo ./k8s-pi.sh green-master <device path> --add-pub-key=<public SSH key path> 
 example:
 sudo ./k8s-pi.sh green-master /dev/mmcblk0 --skip-flash --add-pub-key=/home/radowan/.ssh/id_rsa.pub --gpu-memory=16
 ```
-- replace MicroSD card with MicroSD card for `yellow worker` and run
+- replace MicroSD card with MicroSD card for `yellow-worker` and run
 ```
 sudo ./k8s-pi.sh yellow-worker <device path> --add-pub-key=<public SSH key path> --gpu-memory=16
 ```
-- replace MicroSD card with MicroSD card for `red worker` into your PC and run
+- replace MicroSD card with MicroSD card for `red-worker` into your PC and run
 ```
 sudo ./k8s-pi.sh red-worker <device path> --add-pub-key=<public SSH key path> --gpu-memory=16
 ```
@@ -55,6 +55,6 @@ ssh pi@192.168.0.1 k8s/install.sh
 ```
 - store output and setup k8s on `yellow-worker` and `red-worker`
 ```
-ssh pi@192.168.0.1 k8s/install.sh
-ssh pi@192.168.0.1 k8s/install.sh
+ssh pi@192.168.0.2 k8s/install.sh
+ssh pi@192.168.0.3 k8s/install.sh
 ```
