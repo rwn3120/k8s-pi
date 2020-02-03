@@ -9,9 +9,9 @@ fi
 # variables
 BIN=$(basename "${0}" | sed 's/\..*//')
 DIR=$(dirname $(readlink -f "${0}"))
-K8S_INSTALL="${DIR}/k8s-install"
+K8S_INSTALL="${DIR}/k8s"
 RASPBIAN_IMAGE_URL=${RASPBIAN_IMAGE_URL:-"https://downloads.raspberrypi.org/raspbian_lite/images/raspbian_lite-2019-09-30/2019-09-26-raspbian-buster-lite.zip"}
-WORK_DIRECTORY="/tmp/${BIN}.tmp"
+WORK_DIRECTORY="/tmp/${BIN}"
 CLUSTER_HOSTS_FILE="${DIR}/cluster_hosts"
 NO_CACHE="false"
 SKIP_FLASH="false"
@@ -31,10 +31,11 @@ Options:
     --add-pub-key=<value>        ... public key to add to authorized_keys
     --gpu-memory=<value>         ... GPU memory to use (values 16, 64, 128, 256, 512)
     --no-cache                   ... force download Raspbian image
+    --http-proxy                 ... use http proxy
     --skip-flash                 ... skip writting image to device
 Example:
     ${BIN} green-master /dev/mmcblk0
-    ${BIN} --cluster-hosts=./cluster_hosts green-master /dev/mmcblk0
+    ${BIN} --cluster-hosts=./cluster_hosts --http-proxy="http://my-company-proxy.com:80/" green-master /dev/mmcblk0
 EOL
 }
 
@@ -43,6 +44,7 @@ NODE=""
 DEVICE=""
 PUB_KEY=""
 GPU_MEMORY=""
+HTTP_PROXY=""
 for ARG in "${@}"; do
     ARG_VALUE="${ARG#*=}"
     case "${ARG}" in
@@ -63,6 +65,8 @@ for ARG in "${@}"; do
             PUB_KEY="${ARG_VALUE}";;
         --gpu-memory=*)
             GPU_MEMORY="${ARG_VALUE}";;
+        --http-proxy=*)
+            HTTP_PROXY="${ARG_VALUE}";;
         --*)
             echo "${ARG} not supported. Run with -h to display usage." >&2
             exit 2;;
@@ -179,6 +183,9 @@ echo "Setting up network (DHCP)"
 sed -i 's/raspberrypi/'"${NODE}"'/g' "${PI_ROOT}/etc/hostname" "${PI_ROOT}/etc/hosts"
 cat "${CLUSTER_HOSTS_FILE}" | grep -v -E '(^\s*#.*$|^\s*$)' >> "${PI_ROOT}/etc/hosts"
 
+# enable IP forwarding and non-local binding
+sed -ie 's/#*net\.ipv4\.ip_forward\s*=\s*[0-9]*/net.ipv4.ip_forward=1\nnet.ipv4.ip_nonlocal_bind=1/' "${PI_ROOT}/etc/sysctl.conf"
+
 # setup SSH
 echo "Seting up SSH"
 # generate keys
@@ -205,6 +212,9 @@ sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' "${PI_ROOT}/et
 # enable ssh
 touch "${PI_BOOT}/ssh"
 
+# enapblu cgroups
+echo "cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1" >> "${PI_BOOT}/cmdline.txt"
+
 # set GPU memory
 PI_BOOT_CONFIG="${PI_BOOT}/config.txt"
 if [[ "${GPU_MEMORY}" != "" ]]; then
@@ -218,7 +228,29 @@ fi
 echo "Adding K8s install scripts"
 cp -r "${K8S_INSTALL}" "${PI_ROOT}/home/pi/"
 
-exit 0
+# setup http proxy
+if [[ "${HTTP_PROXY}" != "" ]]; then
+    NO_PROXY=$(echo "127.0.0.1,localhost,$(cat "${CLUSTER_HOSTS_FILE}"  | grep -vE '\s*#.*' | awk '{print $1}' | xargs | tr " " ",")")
+    # system proxy
+    cat << EOL > "${PI_ROOT}/etc/environment"
+export HTTP_PROXY="${HTTP_PROXY}"
+export HTTPS_PROXY="${HTTP_PROXY}"
+export NO_PROXY="${NO_PROXY}"
+export http_proxy="${HTTP_PROXY}"
+export https_proxy="${HTTP_PROXY}"
+export no_proxy="${NO_PROXY}"
+EOL
+    # docker proxy
+    mkdir -p "${PI_ROOT}/etc/systemd/system/docker.service.d"
+    cat << EOL > "${PI_ROOT}/etc/systemd/system/docker.service.d/http-proxy.conf"
+[Service]
+Environment=’HTTP_PROXY=${HTTP_PROXY}’
+Environment='HTTPS_PROXY=${HTTP_PROXY}'
+Environment=’${NO_PROXY}’
+EOL
+fi
+sync
+
 # unmount Raspberry Pi storage
 umount "${PI_BOOT}"
 umount "${PI_ROOT}"
