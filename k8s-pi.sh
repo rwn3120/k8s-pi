@@ -9,8 +9,9 @@ fi
 # variables
 BIN=$(basename "${0}" | sed 's/\..*//')
 DIR=$(dirname $(readlink -f "${0}"))
-K8S_INSTALL="${DIR}/k8s"
-RASPBIAN_IMAGE_URL=${RASPBIAN_IMAGE_URL:-"https://downloads.raspberrypi.org/raspbian_lite/images/raspbian_lite-2019-09-30/2019-09-26-raspbian-buster-lite.zip"}
+K8S_INSTALL="${DIR}/install"
+EXAMPLES="${DIR}/examples"
+IMAGE_URL=${IMAGE_URL:-"http://cdimage.ubuntu.com/releases/19.10.1/release/ubuntu-19.10.1-preinstalled-server-arm64+raspi3.img.xz"}
 WORK_DIRECTORY="/tmp/${BIN}"
 CLUSTER_HOSTS_FILE="${DIR}/cluster_hosts"
 NO_CACHE="false"
@@ -26,11 +27,11 @@ Usage:
 
 Options:
     --cluster-hosts=<value>      ... file with cluster hosts (default cluster-hosts="${CLUSTER_HOSTS_FILE}")
-    --raspbian-image-url=<value> ... raspbian image URL (default --raspbian-image-url="${RASPBIAN_IMAGE_URL}")
+    --image-url=<value>          ... image URL (default --image-url="${IMAGE_URL}")
     --work-directory=<value>     ... working directory (default --work-directory="${WORK_DIRECTORY}")
     --add-pub-key=<value>        ... public key to add to authorized_keys
     --gpu-memory=<value>         ... GPU memory to use (values 16, 64, 128, 256, 512)
-    --no-cache                   ... force download Raspbian image
+    --no-cache                   ... force to download the image
     --http-proxy                 ... use http proxy
     --skip-flash                 ... skip writting image to device
 Example:
@@ -55,8 +56,8 @@ for ARG in "${@}"; do
             CLUSTER_HOSTS_FILE="${ARG_VALUE}";;
         --work-directory=*)
             WORK_DIRECTORY="${ARG_VALUE}";;
-        --raspbian-image-url=*)
-            RASPBIAN_IMAGE_URL="${ARG_VALUE}";;
+        --image-url=*)
+            IMAGE_URL="${ARG_VALUE}";;
         --no-cache)
             NO_CACHE="true";;
         --skip-flash)
@@ -89,6 +90,10 @@ if [[ ! -f "${CLUSTER_HOSTS_FILE}" ]]; then
     echo "${CLUSTER_HOSTS_FILE} does not exist or is not a file" >&2
     exit 253
 fi
+if ! grep -iE '\-master$' "${CLUSTER_HOSTS_FILE}" >/dev/null; then 
+    echo "${CLUSTER_HOSTS_FILE} does not contain master node" >&2
+fi
+
 if [[ "${NODE}" == "" ]]; then
     echo "Missing argument <node>. Run with -h to display usage." >&2
     exit 252
@@ -128,7 +133,7 @@ fi
 # unmount device
 MOUNT_POINTS=($(df | grep -E "^${DEVICE}" | sed 's/.*% //'))
 if [[ ${#MOUNT_POINTS[@]} -gt 0 ]]; then
-    read -p "Continue and unmount device? [y/N] " -n 1 -r
+    read -p "Continue and unmount ${DEVICE}? [y/N] " -n 1 -r
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo -e "\nCancelled"
         exit 245
@@ -143,18 +148,11 @@ fi
 if [[ "${SKIP_FLASH}" == "false" ]]; then
     # download image
     mkdir -p "${WORK_DIRECTORY}"
-    IMAGE_FILE="$(basename "${RASPBIAN_IMAGE_URL}" "$(basename "${RASPBIAN_IMAGE_URL}" | sed 's/.*\././')").img"
-    IMAGE_FULLPATH="${WORK_DIRECTORY}/${IMAGE_FILE}"
-    if [[ ! -f "${IMAGE_FULLPATH}" ]] || [[ "${NO_CACHE}" == "true" ]]; then
-        IMAGE_ZIP="${WORK_DIRECTORY}/$(basename "${RASPBIAN_IMAGE_URL}")"
-        if [[ ! -f "${IMAGE_ZIP}" ]] || [[ "${NO_CACHE}" == "true" ]]; then
-            echo "Downloading ${RASPBIAN_IMAGE_URL}"
-            wget -q --show-progress "${RASPBIAN_IMAGE_URL}" -O "${IMAGE_ZIP}"
-        fi
-        echo "Extracting ${IMAGE_FILE}"
-        unzip -u -d "${WORK_DIRECTORY}" "${IMAGE_ZIP}" "${IMAGE_FILE}"
+    IMAGE_FILE="${WORK_DIRECTORY}/$(basename "${IMAGE_URL}" "$(basename "${IMAGE_URL}")")"
+    if [[ ! -f "${IMAGE_FILE}" ]] || [[ "${NO_CACHE}" == "true" ]]; then
+        echo "Downloading ${IMAGE_URL}"
+        wget -q --show-progress "${IMAGE_URL}" -O "${IMAGE_FILE}"
     fi
-    IMAGE_FILE="${IMAGE_FULLPATH}"
     # write image to device
     if [[ "${FORCE:-false}" != "true" ]]; then
         read -p "Do you really want to write ${IMAGE_FILE} to ${DEVICE}? [y/N] " -n 1 -r
@@ -165,13 +163,14 @@ if [[ "${SKIP_FLASH}" == "false" ]]; then
         echo
     fi
     echo "Writting ${IMAGE_FILE} to ${DEVICE}"
-    dd if="${IMAGE_FILE}" of="${DEVICE}" bs=1M status=progress
+    xzcat "${IMAGE_FILE}" | sudo dd of="${DEVICE}" bs=32M status=progress
     sync
     # resize partition to max
     parted -s "${DEVICE}" resizepart 2 100%
 fi
 
 # mount Raspberry Pi storage
+echo "Mounting ${DEVICE} to ${WORK_DIRECTORY}/mnt"
 PI_BOOT="${WORK_DIRECTORY}/mnt/boot"
 PI_ROOT="${WORK_DIRECTORY}/mnt/root"
 mkdir -p "${PI_BOOT}" "${PI_ROOT}"
@@ -180,14 +179,13 @@ mount "${DEVICE}p2" "${PI_ROOT}"
 
 # setup network 
 echo "Setting up network (DHCP)"
-sed -i 's/raspberrypi/'"${NODE}"'/g' "${PI_ROOT}/etc/hostname" "${PI_ROOT}/etc/hosts"
+sed -i 's/ubuntu/'"${NODE}"'/g' "${PI_ROOT}/etc/hostname" "${PI_ROOT}/etc/hosts"
 cat "${CLUSTER_HOSTS_FILE}" | grep -v -E '(^\s*#.*$|^\s*$)' >> "${PI_ROOT}/etc/hosts"
 
 # enable IP forwarding and non-local binding
+echo "Enabling IP forwarding & non-local binding"
 sed -ie 's/#*net\.ipv4\.ip_forward\s*=\s*[0-9]*/net.ipv4.ip_forward=1\nnet.ipv4.ip_nonlocal_bind=1/' "${PI_ROOT}/etc/sysctl.conf"
 
-# setup SSH
-echo "Seting up SSH"
 # generate keys
 SSH_KEY_FILE="${WORK_DIRECTORY}/id_rsa"
 SSH_PUB_KEY_FILE="${SSH_KEY_FILE}.pub"
@@ -196,24 +194,34 @@ if [[ ! -f "${SSH_KEY_FILE}" ]] || [[ ! -f "${SSH_PUB_KEY_FILE}" ]]; then
     ssh-keygen -N '' -f "${SSH_KEY_FILE}" -t rsa -b 4096 > /dev/null
 fi
 # add keys to Raspberry Pi
-PI_SSH_DIR="${PI_ROOT}/home/pi/.ssh"
-mkdir -p "${PI_SSH_DIR}"
-cp "${SSH_KEY_FILE}" "${PI_SSH_DIR}"
-cat "${SSH_PUB_KEY_FILE}" >> "${PI_SSH_DIR}/authorized_keys"
+echo "Updating SSH keys"
+SSH_DIR="${PI_ROOT}/home/ubuntu/.ssh"
+mkdir -p "${SSH_DIR}"
+cp "${SSH_KEY_FILE}" "${SSH_PUB_KEY_FILE}" "${SSH_DIR}"
+cat "${SSH_PUB_KEY_FILE}" >> "${SSH_DIR}/authorized_keys"
 # add custom key
 if [[ "${PUB_KEY}" != "" ]]; then
-    cat "${PUB_KEY}" >> "${PI_SSH_DIR}/authorized_keys"
+    echo "Adding ${PUB_KEY} to authorized keys"
+    cat "${PUB_KEY}" >> "${SSH_DIR}/authorized_keys"
 fi
 # cleanup keys
-cat "${PI_SSH_DIR}/authorized_keys" | sort | uniq > "${PI_SSH_DIR}/authorized_keys.tmp"
-cp "${PI_SSH_DIR}/authorized_keys.tmp" "${PI_SSH_DIR}/authorized_keys"
+echo "Updating authorized keys (SSH)"
+cat "${SSH_DIR}/authorized_keys" | sort | uniq > "${SSH_DIR}/authorized_keys.tmp"
+mv "${SSH_DIR}/authorized_keys.tmp" "${SSH_DIR}/authorized_keys"
 # disable password login
+echo "Disabling password authentication (SSH)"
 sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' "${PI_ROOT}/etc/ssh/sshd_config"
 # enable ssh
+echo "Enabling SSH"
 touch "${PI_BOOT}/ssh"
 
 # enapblu cgroups
-echo "cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1" >> "${PI_BOOT}/cmdline.txt"
+echo "Enabling cgroup modules"
+cp "${PI_BOOT}/nobtcmd.txt" "${PI_BOOT}/nobtcmd.txt.backup"
+echo "$(cat "${PI_BOOT}/nobtcmd.txt.backup") cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1" | xargs > "${PI_BOOT}/nobtcmd.txt"
+# disable password expiration
+echo "Disabling password expiration"
+sed -i 's/expire: true/expire: false/' "${PI_BOOT}/user-data"
 
 # set GPU memory
 PI_BOOT_CONFIG="${PI_BOOT}/config.txt"
@@ -225,11 +233,19 @@ if [[ "${GPU_MEMORY}" != "" ]]; then
 fi
 
 # add K8s install scripts
-echo "Adding K8s install scripts"
-cp -r "${K8S_INSTALL}" "${PI_ROOT}/home/pi/"
+echo "Adding directory with K8s installation scripts"
+cp -r "${K8S_INSTALL}" "${PI_ROOT}/home/ubuntu/"
+
+# add examples
+MASTER_NODE=$(grep -Ei 'master\s*$' "${CLUSTER_HOSTS_FILE}" | head -1 | awk '{print $2}')
+if [[ -d "${EXAMPLES}" ]] && [[ "${MASTER_NODE}" == "${NODE}" ]]; then
+    echo "Adding directory with K8s deployment examples"
+    cp -r "${EXAMPLES}" "${PI_ROOT}/home/ubuntu/"
+fi
 
 # setup http proxy
 if [[ "${HTTP_PROXY}" != "" ]]; then
+    echo "Setting up proxy (${HTTP_PROXY})"
     NO_PROXY=$(echo "127.0.0.1,localhost,$(cat "${CLUSTER_HOSTS_FILE}"  | grep -vE '\s*#.*' | awk '{print $1}' | xargs | tr " " ",")")
     # system proxy
     cat << EOL > "${PI_ROOT}/etc/environment"
@@ -249,10 +265,20 @@ Environment='HTTPS_PROXY=${HTTP_PROXY}'
 Environment=’${NO_PROXY}’
 EOL
 fi
+
+# sync
 sync
 
+# set home dir permissions (yep, ubuntu user has UID=1000)
+echo "Setting file permissions"
+chown -R 1000:1000 "${PI_ROOT}/home/ubuntu/"
+
 # unmount Raspberry Pi storage
+echo "Unmounting ${DEVICE}"
 umount "${PI_BOOT}"
 umount "${PI_ROOT}"
 
+# sync (double tap)
 sync
+
+echo "Done!"
